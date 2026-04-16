@@ -3,13 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>全能条码/GS1解析器</title>
+    <title>全能条码/GS1解析器 Pro</title>
     <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
         :root { --ios-blue: #007AFF; --bg: #F2F2F7; }
         body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); margin: 0; padding: 20px; }
-        #reader { width: 100%; border-radius: 16px; overflow: hidden; background: black; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
-        .card { background: white; border-radius: 14px; padding: 16px; margin-top: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+        
+        /* 扫描器外层容器：支持定位动效 */
+        .reader-container { position: relative; width: 100%; border-radius: 16px; overflow: hidden; background: black; box-shadow: 0 8px 24px rgba(0,0,0,0.12); transition: opacity 0.3s ease;}
+        #reader { width: 100%; border: none; }
+        
+        /* 激光扫描线 */
+        .scan-laser { position: absolute; width: 70%; height: 2px; background: #34C759; box-shadow: 0 0 15px #34C759; left: 15%; top: 30%; z-index: 10; pointer-events: none; animation: scan-anim 2s infinite alternate ease-in-out; display: none;}
+        .scanning .scan-laser { display: block; }
+        @keyframes scan-anim { 0% { top: 25%; } 100% { top: 75%; } }
+
+        /* 成功识别时的全屏绿光闪烁 */
+        .success-flash { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(52, 199, 89, 0.4); z-index: 20; opacity: 0; pointer-events: none; transition: opacity 0.1s ease-out; }
+        .success-flash.active { opacity: 1; transition: none; }
+
+        .card { background: white; border-radius: 14px; padding: 16px; margin-top: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         
         .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;}
         .format-badge { background: #34C759; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold;}
@@ -27,15 +41,20 @@
         .ai-tag.unknown { background: #FFCC00; color: #523A00; }
         .value { font-size: 17px; font-weight: 600; color: #1c1c1e; font-family: monospace; letter-spacing: 0.5px; word-break: break-all;}
         
-        .copy-btn { background: var(--ios-blue); color: white; border: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;}
+        .copy-btn { background: var(--ios-blue); color: white; border: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s;}
         .btn-reset { width: 100%; margin-top: 20px; padding: 16px; border: none; background: white; color: var(--ios-blue); border-radius: 14px; font-size: 17px; font-weight: 600; cursor: pointer;}
-        .status { text-align: center; color: #8e8e93; font-size: 14px; margin-bottom: 10px; }
+        .status { text-align: center; color: #8e8e93; font-size: 14px; margin-bottom: 10px; font-weight: 500;}
     </style>
 </head>
 <body>
 
-    <div class="status" id="status">正在启动摄像头...</div>
-    <div id="reader"></div>
+    <div class="status" id="status">准备就绪，请对准条码...</div>
+    
+    <div id="readerContainer" class="reader-container">
+        <div id="reader"></div>
+        <div class="scan-laser"></div>
+        <div id="successFlash" class="success-flash"></div>
+    </div>
 
     <div id="resultArea" style="display: none;">
         <div class="card">
@@ -46,19 +65,42 @@
             <div class="raw-data" id="rawText"></div>
             <div id="parsedContent" style="margin-top: 15px;"></div>
         </div>
-        <button class="btn-reset" onclick="restartScanner()">继续扫描</button>
+        <button class="btn-reset" onclick="restartScanner()">重新扫描</button>
     </div>
 
     <script>
         const html5QrCode = new Html5Qrcode("reader");
         const statusEl = document.getElementById('status');
-        
-        // GS1 字典
+        const readerContainer = document.getElementById('readerContainer');
+        const successFlash = document.getElementById('successFlash');
+        let isScanning = false;
+
+        // 初始化底层的蜂鸣器 (纯代码生成声音，极低延迟)
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx;
+        function playBeep() {
+            try {
+                if (!audioCtx) audioCtx = new AudioContext();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime); // 模拟扫码枪高频音
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.1);
+                osc.stop(audioCtx.currentTime + 0.1);
+            } catch(e) { console.log("音频播放失败", e); }
+        }
+
+        // GS1 字典及解析引擎 (保留了全能智能版的强大逻辑)
         const AIDict = {
-            "00": { len: 18, label: "SSCC" }, "01": { len: 14, label: "GTIN (商品条码)" }, "02": { len: 14, label: "物流单元商品码" },
-            "10": { len: 'var', label: "批次号" }, "11": { len: 6, label: "生产日期" }, "15": { len: 6, label: "最佳使用日期" },
+            "00": { len: 18, label: "SSCC" }, "01": { len: 14, label: "GTIN" }, "02": { len: 14, label: "物流单元码" },
+            "10": { len: 'var', label: "批次号" }, "11": { len: 6, label: "生产日期" }, "15": { len: 6, label: "最佳日期" },
             "17": { len: 6, label: "有效期" }, "20": { len: 2, label: "产品变体" }, "21": { len: 'var', label: "序列号" },
-            "30": { len: 'var', label: "数量" }, "240": { len: 'var', label: "附加产品标识" }, "241": { len: 'var', label: "客户部件号" }
+            "30": { len: 'var', label: "数量" }, "240": { len: 'var', label: "附加标识" }, "241": { len: 'var', label: "客户部件号" }
         };
 
         function getAIRule(text, i) {
@@ -78,105 +120,85 @@
             return clean.replace(/[\x1c-\x1f\ufffd□]/g, '\x1d');
         }
 
-        // 核心：智能路由逻辑
         function smartParse(rawText, formatName) {
             let cleanText = preprocessText(rawText);
-
-            // 1. 如果是普通的 EAN/UPC 商品条码
-            if (formatName.includes("EAN") || formatName.includes("UPC")) {
-                return [{ ai: "EAN", label: "标准商品条码", value: rawText }];
-            }
-
-            // 2. 如果是普通二维码且内容明显不是 GS1 (非数字开头，且不包含分隔符)
-            // GS1 格式通常是数字开头 (如 01...)
+            if (formatName.includes("EAN") || formatName.includes("UPC")) return [{ ai: "EAN", label: "标准商品条码", value: rawText }];
             if (formatName === "QR_CODE" && !/^\d/.test(cleanText) && !cleanText.includes('\x1d')) {
                 let isLink = rawText.startsWith("http://") || rawText.startsWith("https://");
                 return [{ ai: "TXT", label: isLink ? "网页链接" : "普通文本", value: rawText }];
             }
-
-            // 3. 否则，作为 GS1 标准解析
             return customGS1Parse(cleanText);
         }
 
         function customGS1Parse(text) {
             let results = [];
             let i = 0;
-
-            // 如果一开始就找不到任何匹配的 AI，且没有分隔符，兜底为普通文本
-            if (getAIRule(text, 0) === null && !text.includes('\x1d')) {
-                 return [{ ai: "TXT", label: "非标准段落内容", value: text }];
-            }
+            if (getAIRule(text, 0) === null && !text.includes('\x1d')) return [{ ai: "TXT", label: "非标准段落内容", value: text }];
 
             while (i < text.length) {
                 if (text[i] === '\x1d') { i++; continue; }
                 let match = getAIRule(text, i);
                 if (match) {
-                    let ai = match.ai;
                     let rule = match.rule;
-                    i += ai.length; 
+                    i += match.ai.length; 
                     if (rule.len === 'var') {
                         let nextFnc1 = text.indexOf('\x1d', i);
-                        if (nextFnc1 === -1) {
-                            results.push({ ai: ai, label: rule.label, value: text.substring(i) });
-                            break;
-                        } else {
-                            results.push({ ai: ai, label: rule.label, value: text.substring(i, nextFnc1) });
-                            i = nextFnc1 + 1; 
-                        }
+                        if (nextFnc1 === -1) { results.push({ ai: match.ai, label: rule.label, value: text.substring(i) }); break; }
+                        else { results.push({ ai: match.ai, label: rule.label, value: text.substring(i, nextFnc1) }); i = nextFnc1 + 1; }
                     } else {
-                        let val = text.substring(i, i + rule.len);
-                        results.push({ ai: ai, label: rule.label, value: val });
+                        results.push({ ai: match.ai, label: rule.label, value: text.substring(i, i + rule.len) });
                         i += rule.len; 
                     }
                 } else {
                     let nextFnc1 = text.indexOf('\x1d', i);
-                    if (nextFnc1 === -1) {
-                        results.push({ ai: "??", label: "未知字段", value: text.substring(i) });
-                        break;
-                    } else {
-                        results.push({ ai: "??", label: "未知字段", value: text.substring(i, nextFnc1) });
-                        i = nextFnc1 + 1; 
-                    }
+                    if (nextFnc1 === -1) { results.push({ ai: "??", label: "未知字段", value: text.substring(i) }); break; }
+                    else { results.push({ ai: "??", label: "未知字段", value: text.substring(i, nextFnc1) }); i = nextFnc1 + 1; }
                 }
             }
             return results;
         }
 
         function onScanSuccess(decodedText, decodedResult) {
-            try { if (navigator.vibrate) navigator.vibrate(200); } catch(e){}
-            html5QrCode.stop();
-            statusEl.innerText = "扫描成功";
+            if (!isScanning) return; // 防止连续触发
+            isScanning = false;
             
-            // 提取物理码制格式
-            let formatName = "未知码制";
-            if (decodedResult && decodedResult.result && decodedResult.result.format) {
-                formatName = decodedResult.result.format.formatName || "未知";
-            }
-            
-            // 更新码制角标 UI
-            const badgeEl = document.getElementById('formatBadge');
-            badgeEl.innerText = formatName;
-            badgeEl.className = "format-badge"; 
-            if(formatName === "QR_CODE") badgeEl.classList.add("qr");
-            if(formatName.includes("EAN") || formatName.includes("UPC")) badgeEl.classList.add("ean");
+            // 1. 触发听觉与物理反馈
+            playBeep();
+            if (navigator.vibrate) navigator.vibrate([100]); 
 
-            let standardText = preprocessText(decodedText);
-            document.getElementById('rawText').innerHTML = standardText.replace(/\x1d/g, '<span class="fnc1-badge">FNC1</span>');
-            
-            // 使用智能路由进行解析
+            // 2. 触发视觉反馈：激光消失，屏幕闪绿光
+            readerContainer.classList.remove('scanning');
+            successFlash.classList.add('active');
+            statusEl.innerText = "捕获成功！";
+
+            // 3. 提取格式并解析数据
+            let formatName = (decodedResult && decodedResult.result && decodedResult.result.format) ? decodedResult.result.format.formatName : "未知";
             const elements = smartParse(decodedText, formatName);
-            renderResults(elements);
-            document.getElementById('resultArea').style.display = 'block';
+
+            // 4. 定格动画延迟：让用户看清“绿光一闪”，再平滑切换界面 (延迟300ms)
+            setTimeout(() => {
+                html5QrCode.pause(); // 暂停摄像头但不销毁
+                successFlash.classList.remove('active');
+                readerContainer.style.display = 'none'; // 隐藏扫描界面
+                
+                // 更新 UI
+                const badgeEl = document.getElementById('formatBadge');
+                badgeEl.innerText = formatName;
+                badgeEl.className = "format-badge"; 
+                if(formatName === "QR_CODE") badgeEl.classList.add("qr");
+                if(formatName.includes("EAN") || formatName.includes("UPC")) badgeEl.classList.add("ean");
+
+                document.getElementById('rawText').innerHTML = preprocessText(decodedText).replace(/\x1d/g, '<span class="fnc1-badge">FNC1</span>');
+                renderResults(elements);
+                
+                document.getElementById('resultArea').style.display = 'block'; // 显示结果面板
+            }, 300);
         }
 
         function renderResults(elements) {
-            const container = document.getElementById('parsedContent');
-            container.innerHTML = elements.map(el => {
+            document.getElementById('parsedContent').innerHTML = elements.map(el => {
                 let cleanValue = el.value.replace(/\x1d/g, ''); 
-                let aiClass = "ai-tag";
-                if (el.ai === "??") aiClass += " unknown";
-                if (el.ai === "TXT" || el.ai === "EAN") aiClass += " txt";
-                
+                let aiClass = "ai-tag" + (el.ai === "??" ? " unknown" : "") + (el.ai === "TXT" || el.ai === "EAN" ? " txt" : "");
                 return `
                 <div class="data-row">
                     <div style="flex: 1; padding-right: 15px;">
@@ -184,35 +206,45 @@
                         <div class="value">${cleanValue}</div>
                     </div>
                     <button class="copy-btn" onclick="copyText(this, '${cleanValue}')">复制</button>
-                </div>
-            `}).join('');
+                </div>`
+            }).join('');
         }
 
-        function copyText(btnElement, text) {
+        function copyText(btn, text) {
             navigator.clipboard.writeText(text).then(() => {
-                const originalText = btnElement.innerText;
-                btnElement.innerText = "成功";
-                btnElement.style.background = "#34C759";
-                setTimeout(() => {
-                    btnElement.innerText = originalText;
-                    btnElement.style.background = ""; 
-                }, 1000);
+                let oldText = btn.innerText;
+                btn.innerText = "成功";
+                btn.style.background = "#34C759";
+                setTimeout(() => { btn.innerText = oldText; btn.style.background = ""; }, 1000);
             });
         }
 
         function restartScanner() {
             document.getElementById('resultArea').style.display = 'none';
-            start();
+            readerContainer.style.display = 'block';
+            successFlash.classList.remove('active');
+            
+            // 恢复扫描
+            html5QrCode.resume();
+            isScanning = true;
+            readerContainer.classList.add('scanning');
+            statusEl.innerText = "请对准目标条码...";
         }
 
         function start() {
-            statusEl.innerText = "请对准条码或二维码...";
-            // 不再限定特定的格式，让摄像头自由探测所有格式
+            // 设置了 qrbox 后，扫码库会自动进行图像裁切。只有处于中心框内的条码才会被传入解析引擎。
             html5QrCode.start(
                 { facingMode: "environment" }, 
-                { fps: 20, qrbox: (w, h) => { return { width: w * 0.7, height: h * 0.4 } } },
+                { fps: 20, qrbox: { width: 250, height: 250 } }, // 核心瞄准框
                 onScanSuccess
-            ).catch(err => {
+            ).then(() => {
+                isScanning = true;
+                readerContainer.classList.add('scanning');
+                // 首次点击屏幕解锁音频上下文 (iOS 浏览器限制)
+                document.body.addEventListener('touchstart', () => {
+                    if (!audioCtx) audioCtx = new AudioContext();
+                }, { once: true });
+            }).catch(err => {
                 statusEl.innerText = "请允许使用摄像头权限";
             });
         }
