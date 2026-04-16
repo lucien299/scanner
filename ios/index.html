@@ -3,168 +3,194 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>GS1 AR Scanner Pro</title>
-    <script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+    <title>GS1 AR 跟随扫描器</title>
+    <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
-        :root { --ios-green: #34C759; }
-        body { font-family: -apple-system; background: #000; margin: 0; overflow: hidden; color: white; }
+        :root { --ios-blue: #007AFF; --ios-green: #34C759; }
+        body { font-family: -apple-system, sans-serif; background: #000; margin: 0; overflow: hidden; }
         
         /* 扫描容器 */
-        #viewport { position: relative; width: 100vw; height: 60vh; background: #111; }
-        #video { width: 100%; height: 100%; object-fit: cover; }
-        #arCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
-
-        /* 状态监控面板（调试用） */
-        #debug-console { position: absolute; top: 10px; left: 10px; font-family: monospace; font-size: 10px; color: #0f0; background: rgba(0,0,0,0.5); padding: 5px; z-index: 100; pointer-events: none; }
-
-        /* 结果面板 */
-        #result-panel { height: 40vh; background: #1c1c1e; padding: 15px; overflow-y: auto; border-top: 1px solid #333; }
-        .barcode-card { background: #2c2c2e; border-radius: 10px; padding: 12px; margin-bottom: 10px; border-left: 4px solid var(--ios-green); }
-        .val { font-family: monospace; color: var(--ios-green); font-weight: bold; }
+        #reader-wrapper { position: relative; width: 100vw; height: 100vh; background: #000; }
+        #reader { width: 100% !important; height: 100% !important; border: none !important; }
         
-        .start-layer { position: fixed; inset: 0; background: #000; z-index: 200; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .btn { background: var(--ios-green); color: #000; border: none; padding: 15px 40px; border-radius: 30px; font-weight: bold; font-size: 18px; }
+        /* AR 绘图层：关键 */
+        #ar-canvas {
+            position: absolute;
+            top: 0; left: 0;
+            z-index: 100;
+            pointer-events: none; /* 让点击穿透到下层 */
+        }
+
+        /* 底部信息面板：半透明 iOS 风格 */
+        #info-panel {
+            position: absolute;
+            bottom: 30px; left: 15px; right: 15px;
+            background: rgba(28, 28, 30, 0.85);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 18px;
+            padding: 20px;
+            z-index: 200;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            transform: translateY(120%);
+            transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        #info-panel.active { transform: translateY(0); }
+
+        .ai-card { margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px; }
+        .ai-row { display: flex; align-items: flex-start; margin-bottom: 8px; }
+        .ai-tag { background: var(--ios-green); color: #000; font-size: 11px; font-weight: bold; padding: 2px 6px; border-radius: 4px; margin-right: 10px; margin-top: 2px; }
+        .ai-val { color: #fff; font-family: monospace; font-size: 15px; word-break: break-all; }
+        .status-dot { display: inline-block; width: 8px; height: 8px; background: var(--ios-green); border-radius: 50%; margin-right: 6px; box-shadow: 0 0 8px var(--ios-green); }
     </style>
 </head>
 <body>
 
-<div id="debug-console">系统就绪...</div>
-
-<div class="start-layer" id="startLayer">
-    <h2>AR 扫描终端</h2>
-    <button class="btn" onclick="init()">启动系统</button>
+<div id="reader-wrapper">
+    <div id="reader"></div>
+    <canvas id="ar-canvas"></canvas>
 </div>
 
-<div id="viewport">
-    <video id="video" playsinline muted></video>
-    <canvas id="arCanvas"></canvas>
-</div>
-
-<div id="result-panel">
-    <div id="list"></div>
+<div id="info-panel">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="color: #8e8e93; font-size: 12px; font-weight: 600;">
+            <span class="status-dot"></span>已锁定条码: <span id="res-format" style="color:#fff"></span>
+        </div>
+        <button onclick="hidePanel()" style="background:none; border:none; color:var(--ios-blue); font-size:14px; font-weight:600;">收起</button>
+    </div>
+    <div id="res-content" class="ai-card"></div>
 </div>
 
 <script>
-    const logEl = document.getElementById('debug-console');
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('arCanvas');
-    const ctx = canvas.getContext('2d');
-    const listEl = document.getElementById('list');
+    const html5QrCode = new Html5Qrcode("reader");
+    const arCanvas = document.getElementById('ar-canvas');
+    const ctx = arCanvas.getContext('2d');
+    const infoPanel = document.getElementById('info-panel');
+    const resContent = document.getElementById('res-content');
+    const resFormat = document.getElementById('res-format');
 
-    let codeReader;
-    let isDecoding = false; // 解码锁，防止堆栈溢出
+    let isLocked = false;
+    let lockTimer = null;
 
-    function logger(msg) {
-        logEl.innerText = msg;
-        console.log(msg);
+    // --- GS1 解析逻辑 ---
+    const AIDict = { "01": "GTIN", "10": "批次号", "11": "生产日期", "17": "有效期", "21": "序列号", "10": "批次" };
+    function parseGS1(text) {
+        let clean = text.replace(/^\]C1|\]e0|\]d2/, "").replace(/[\x1c-\x1f]/g, '\x1d');
+        let parts = [];
+        if (clean.includes('\x1d') || clean.match(/^(01|17|10|21)/)) {
+            // 简单演示解析逻辑
+            if (clean.startsWith("01")) parts.push({ ai: "01", label: "GTIN", val: clean.substring(2, 16) });
+            else parts.push({ ai: "CODE", label: "内容", val: clean.substring(0, 20) });
+        } else {
+            parts.push({ ai: "TXT", label: "原始文本", val: clean });
+        }
+        return parts;
     }
 
-    async function init() {
-        document.getElementById('startLayer').style.display = 'none';
-        logger("正在初始化解码引擎...");
-
-        // 初始化 ZXing
-        codeReader = new ZXing.BrowserMultiFormatReader();
-        
-        try {
-            // 获取摄像头：iPhone Pro 建议使用 1280x720，平衡识别精度与功耗
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-            });
-            video.srcObject = stream;
-            await video.play();
-
-            logger("摄像头已连接，启动 AR 循环...");
-            
-            // 确保画布尺寸与视频显示尺寸一致
-            canvas.width = video.offsetWidth;
-            canvas.height = video.offsetHeight;
-
-            requestAnimationFrame(renderLoop);
-        } catch (err) {
-            logger("错误: " + err.message);
-        }
-    }
-
-    async function renderLoop() {
-        // 1. 如果上一帧还在解析，则跳过此帧，避免卡死
-        if (isDecoding) {
-            requestAnimationFrame(renderLoop);
-            return;
-        }
-
-        isDecoding = true;
+    // --- 启动扫描 ---
+    async function start() {
+        const config = { 
+            fps: 25, 
+            qrbox: (w, h) => { return { width: w * 0.8, height: h * 0.4 } }, // 限制扫描区域提高性能
+            aspectRatio: window.innerHeight / window.innerWidth 
+        };
 
         try {
-            // 2. 核心：从当前视频元素抓取并解析（支持多码）
-            const results = await codeReader.decodeFromVideoElement(video);
+            await html5QrCode.start(
+                { facingMode: "environment" },
+                config,
+                (text, result) => onScanSuccess(text, result)
+            );
             
-            // 如果执行到这里说明有结果
-            if (results) {
-                drawAR(results);
-                updateList(results);
-            }
+            // 初始化画布尺寸
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            
+            // 启动 AR 清洗循环
+            requestAnimationFrame(clearLoop);
         } catch (err) {
-            // ZXing 在没扫到码时会抛出异常，这是正常的，清空画布即可
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            if (!(err instanceof ZXing.NotFoundException)) {
-                logger("解析异常: " + err.name);
-            }
-        } finally {
-            isDecoding = false;
-            requestAnimationFrame(renderLoop);
+            alert("启动失败: " + err);
         }
     }
 
-    function drawAR(result) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        
-        // 获取坐标点
-        const points = result.getResultPoints();
-        if (!points || points.length === 0) return;
+    function resizeCanvas() {
+        arCanvas.width = window.innerWidth;
+        arCanvas.height = window.innerHeight;
+    }
 
-        // 计算缩放比例 (视频原始尺寸 vs 画布显示尺寸)
-        const scaleX = canvas.width / video.videoWidth;
-        const scaleY = canvas.height / video.videoHeight;
+    // AR 持续清除逻辑（如果一定时间内没扫到，清除追踪框）
+    function clearLoop() {
+        if (!isLocked) {
+            ctx.clearRect(0, 0, arCanvas.width, arCanvas.height);
+        }
+        requestAnimationFrame(clearLoop);
+    }
 
-        const mappedPoints = points.map(p => ({
+    function onScanSuccess(decodedText, decodedResult) {
+        // 1. 获取坐标点 (这是跟随的关键)
+        const points = decodedResult.result.debugData?.transformedPoints || [];
+        if (points.length > 0) {
+            drawTrackingBox(points, decodedText);
+        }
+
+        // 2. 更新面板信息
+        isLocked = true;
+        clearTimeout(lockTimer);
+        lockTimer = setTimeout(() => { isLocked = false; }, 500); // 0.5秒内没扫到则认为丢失目标
+
+        showPanel(decodedText, decodedResult.result.format.formatName);
+    }
+
+    function drawTrackingBox(points, text) {
+        // 获取实际视频元素，用于坐标转换
+        const video = document.querySelector('#reader video');
+        if (!video) return;
+
+        ctx.clearRect(0, 0, arCanvas.width, arCanvas.height);
+
+        // 计算视频像素到屏幕像素的比例
+        const scaleX = arCanvas.width / video.videoWidth;
+        const scaleY = arCanvas.height / video.videoHeight;
+
+        // 转换点坐标
+        const mapped = points.map(p => ({
             x: p.x * scaleX,
             y: p.y * scaleY
         }));
 
-        // 绘制追踪框
+        // 绘制 AR 追踪框
         ctx.beginPath();
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 4;
         ctx.strokeStyle = '#34C759';
-        ctx.fillStyle = 'rgba(52, 199, 89, 0.2)';
-        
-        ctx.moveTo(mappedPoints[0].x, mappedPoints[0].y);
-        for(let i=1; i<mappedPoints.length; i++) {
-            ctx.lineTo(mappedPoints[i].x, mappedPoints[i].y);
-        }
+        ctx.lineJoin = "round";
+        ctx.moveTo(mapped[0].x, mapped[0].y);
+        mapped.forEach(p => ctx.lineTo(p.x, p.y));
         ctx.closePath();
         ctx.stroke();
-        ctx.fill();
 
-        // 绘制浮动文字
-        ctx.fillStyle = "#fff";
-        ctx.font = "14px monospace";
-        ctx.fillText(result.getText().substring(0, 20), mappedPoints[0].x, mappedPoints[0].y - 10);
+        // 绘制跟随的小标签
+        ctx.fillStyle = "#34C759";
+        ctx.font = "bold 14px -apple-system";
+        ctx.fillText("已锁定", mapped[0].x, mapped[0].y - 15);
     }
 
-    function updateList(result) {
-        const text = result.getText();
-        const type = result.getBarcodeFormat();
-        
-        // 简单展示，实际可加入 GS1 解析逻辑
-        listEl.innerHTML = `
-            <div class="barcode-card">
-                <div style="font-size:11px; color:#888; margin-bottom:5px">格式: ${type}</div>
-                <div class="val">${text}</div>
-                <div style="font-size:12px; margin-top:5px; color:#34C759">● 实时追踪中</div>
+    function showPanel(text, format) {
+        resFormat.innerText = format;
+        const data = parseGS1(text);
+        resContent.innerHTML = data.map(d => `
+            <div class="ai-row">
+                <span class="ai-tag">${d.ai}</span>
+                <span class="ai-val">${d.val}</span>
             </div>
-        `;
+        `).join('');
+        infoPanel.classList.add('active');
     }
+
+    function hidePanel() {
+        infoPanel.classList.remove('active');
+    }
+
+    start();
 </script>
 </body>
 </html>
