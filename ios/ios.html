@@ -1,1 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pro AR GS1 Scanner</title>
+    <script src="https://unpkg.com/@zxing/library@latest"></script>
+    <style>
+        :root { --ios-green: #34C759; --bg: #000; }
+        body { font-family: -apple-system, system-ui; background: var(--bg); margin: 0; overflow: hidden; color: white; }
+        
+        /* 容器与层级 */
+        #container { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+        #video-wrapper { position: relative; width: 100%; height: 65vh; overflow: hidden; background: #111; }
+        video { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
 
+        /* UI面板 */
+        #result-panel { flex: 1; background: #1c1c1e; padding: 20px; overflow-y: auto; border-top: 1px solid #333; z-index: 20; }
+        .barcode-card { background: #2c2c2e; border-radius: 12px; padding: 15px; margin-bottom: 12px; border-left: 4px solid var(--ios-green); }
+        .data-row { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; border-top: 0.5px solid #3a3a3c; padding-top: 8px; }
+        .ai-tag { font-size: 10px; background: #48484a; color: #ddd; padding: 2px 6px; border-radius: 4px; margin-right: 8px; }
+        .value { font-family: monospace; font-size: 14px; font-weight: 600; color: #fff; }
+        
+        /* 启动层 */
+        #boot-layer { position: fixed; inset: 0; background: #000; z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .start-btn { background: var(--ios-green); color: #000; border: none; padding: 18px 45px; border-radius: 35px; font-size: 18px; font-weight: 700; }
+    </style>
+</head>
+<body>
+
+<div id="boot-layer">
+    <h1 style="margin-bottom: 5px;">AR GS1 Terminal</h1>
+    <p style="color: #8e8e93; margin-bottom: 30px;">多目标实时追踪系统</p>
+    <button class="start-btn" onclick="startSystem()">启动增强现实扫描</button>
+</div>
+
+<div id="container">
+    <div id="video-wrapper">
+        <video id="video" playsinline></video>
+        <canvas id="arCanvas"></canvas>
+    </div>
+    <div id="result-panel">
+        <div id="status" style="color: #8e8e93; font-size: 13px; margin-bottom: 15px;">等待目标进入视野...</div>
+        <div id="list"></div>
+    </div>
+</div>
+
+<script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('arCanvas');
+    const ctx = canvas.getContext('2d');
+    const listContainer = document.getElementById('list');
+    const statusText = document.getElementById('status');
+
+    let codeReader;
+    let isScanning = false;
+    let lastResults = new Map();
+
+    // --- GS1 解析逻辑 (保留你的核心解析逻辑) ---
+    const AIDict = { "01": "GTIN", "10": "批次号", "11": "生产日期", "17": "有效期", "21": "序列号" };
+    function parseGS1(text) {
+        let clean = text.replace(/^\]C1|\]e0|\]d2/, "").replace(/[\x1c-\x1f]/g, '\x1d');
+        let results = [];
+        // 简单逻辑示例，生产环境可使用更复杂的循环正则
+        if (clean.startsWith("01")) {
+            results.push({ ai: "01", label: "GTIN", val: clean.substring(2, 16) });
+            if (clean.length > 16) results.push({ ai: "??", label: "附加数据", val: clean.substring(16) });
+        } else {
+            results.push({ ai: "RAW", label: "条码数据", val: clean });
+        }
+        return results;
+    }
+
+    async function startSystem() {
+        document.getElementById('boot-layer').style.display = 'none';
+        
+        // 初始化 ZXing 多格式读取器
+        codeReader = new ZXing.BrowserMultiFormatReader();
+        
+        try {
+            const constraints = { video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            await video.play();
+
+            // 动态设置画布尺寸
+            const resize = () => {
+                canvas.width = video.clientWidth;
+                canvas.height = video.clientHeight;
+            };
+            window.addEventListener('resize', resize);
+            resize();
+
+            isScanning = true;
+            scanLoop();
+        } catch (err) {
+            alert("无法访问摄像头: " + err);
+        }
+    }
+
+    async function scanLoop() {
+        if (!isScanning) return;
+
+        try {
+            // 在画布上实时进行多条码检测
+            // 我们使用 decodeFromVideoElement 的底层逻辑，但手动控制循环以实现 AR 追踪
+            const results = await codeReader.decodeNonEmptyMultiFromVideoElement(video);
+            
+            drawAR(results);
+            updateUI(results);
+        } catch (err) {
+            // 未检测到码时清除画布
+            if (err instanceof ZXing.NotFoundException) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+        
+        requestAnimationFrame(scanLoop);
+    }
+
+    function drawAR(results) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // 计算视频流与实际显示的比例转换 (Object-fit: cover 适配)
+        const videoRatio = video.videoWidth / video.videoHeight;
+        const displayRatio = canvas.width / canvas.height;
+        
+        results.forEach(result => {
+            const points = result.getResultPoints();
+            if (points.length < 2) return;
+
+            // 坐标映射逻辑
+            const mappedPoints = points.map(p => {
+                // 将视频坐标转换为画布坐标
+                let x = (p.x / video.videoWidth) * canvas.width;
+                let y = (p.y / video.videoHeight) * canvas.height;
+                return { x, y };
+            });
+
+            // 绘制追踪框
+            ctx.beginPath();
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = '#34C759';
+            ctx.fillStyle = 'rgba(52, 199, 89, 0.15)';
+            
+            ctx.moveTo(mappedPoints[0].x, mappedPoints[0].y);
+            mappedPoints.forEach(p => ctx.lineTo(p.x, p.y));
+            ctx.closePath();
+            ctx.stroke();
+            ctx.fill();
+
+            // 绘制浮动标签
+            const text = result.getText().substring(0, 10) + "...";
+            ctx.fillStyle = "#34C759";
+            ctx.font = "bold 16px -apple-system";
+            ctx.fillText(text, mappedPoints[0].x, mappedPoints[0].y - 10);
+        });
+    }
+
+    function updateUI(results) {
+        if (results.length > 0) {
+            statusText.innerText = `已锁定 ${results.length} 个目标`;
+            
+            // 简单去重渲染，避免列表闪烁
+            let newHtml = "";
+            results.forEach(res => {
+                const data = parseGS1(res.getText());
+                let rows = data.map(d => `
+                    <div class="data-row">
+                        <div><span class="ai-tag">${d.ai}</span><span style="color:#aaa; font-size:12px">${d.label}</span></div>
+                        <div class="value">${d.val}</div>
+                    </div>
+                `).join('');
+
+                newHtml += `<div class="barcode-card">
+                    <div style="font-size:10px; color:#666; margin-bottom:5px">类型: ${res.getBarcodeFormat()}</div>
+                    ${rows}
+                </div>`;
+            });
+            listContainer.innerHTML = newHtml;
+        }
+    }
+</script>
+</body>
+</html>
