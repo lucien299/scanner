@@ -3,27 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>GS1 终极解析器</title>
-    
+    <title>GS1 终极解析器 Pro</title>
     <script src="https://unpkg.com/html5-qrcode"></script>
-
     <style>
         :root { --ios-blue: #007AFF; --bg: #F2F2F7; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); margin: 0; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); margin: 0; padding: 20px; }
         #reader { width: 100%; border-radius: 16px; overflow: hidden; background: black; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
         .card { background: white; border-radius: 14px; padding: 16px; margin-top: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
-        
         .raw-data { font-size: 13px; color: #333; word-break: break-all; margin-top: 8px; font-family: "SF Mono", monospace; line-height: 1.5; padding: 10px; background: #f8f8f8; border-radius: 8px; border: 1px dashed #ccc;}
         .fnc1-badge { color:#FF3B30; background:#FFE5E5; border:1px solid #FF3B30; border-radius:4px; padding:0 3px; font-size:11px; margin:0 2px; font-weight: bold;}
-        
         .data-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 0.5px solid #E5E5EA; }
         .data-row:last-child { border-bottom: none; }
         .label { font-size: 13px; color: #8e8e93; margin-bottom: 4px; }
         .ai-tag { font-size: 12px; background: #E5E5EA; color: #3a3a3c; padding: 2px 6px; border-radius: 4px; margin-right: 6px; font-weight: 600;}
-        .value { font-size: 17px; font-weight: 600; color: #1c1c1e; font-family: monospace; letter-spacing: 0.5px; }
-        
+        .ai-tag.unknown { background: #FFCC00; color: #523A00; }
+        .value { font-size: 17px; font-weight: 600; color: #1c1c1e; font-family: monospace; letter-spacing: 0.5px; word-break: break-all;}
         .copy-btn { background: var(--ios-blue); color: white; border: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;}
-        .btn-reset { width: 100%; margin-top: 20px; padding: 16px; border: none; background: white; color: var(--ios-blue); border-radius: 14px; font-size: 17px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); cursor: pointer;}
+        .btn-reset { width: 100%; margin-top: 20px; padding: 16px; border: none; background: white; color: var(--ios-blue); border-radius: 14px; font-size: 17px; font-weight: 600; cursor: pointer;}
         .status { text-align: center; color: #8e8e93; font-size: 14px; margin-bottom: 10px; }
     </style>
 </head>
@@ -45,68 +41,104 @@
         const html5QrCode = new Html5Qrcode("reader");
         const statusEl = document.getElementById('status');
         
-        // 我们自己定义的 GS1 规则字典
-        // len: 数字代表固定长度，'var' 代表可变长度
+        // 扩充的 GS1 字典 (包含主流的固定和变长标识符)
         const AIDict = {
+            "00": { len: 18, label: "SSCC (系列货运包装箱代码)" },
             "01": { len: 14, label: "GTIN (商品条码)" },
+            "02": { len: 14, label: "物流单元内商品条码" },
             "10": { len: 'var', label: "批次号" },
-            "11": { len: 6, label: "生产日期" },
-            "17": { len: 6, label: "有效期" },
+            "11": { len: 6, label: "生产日期 (YYMMDD)" },
+            "12": { len: 6, label: "付款日期 (YYMMDD)" },
+            "13": { len: 6, label: "包装日期 (YYMMDD)" },
+            "15": { len: 6, label: "最佳使用日期 (YYMMDD)" },
+            "16": { len: 6, label: "销售截止日期 (YYMMDD)" },
+            "17": { len: 6, label: "有效期 (YYMMDD)" },
+            "20": { len: 2, label: "产品变体" },
             "21": { len: 'var', label: "序列号" },
+            "22": { len: 'var', label: "消费者产品变体" },
             "30": { len: 'var', label: "数量" },
+            "37": { len: 'var', label: "物流单元内数量" },
+            "240": { len: 'var', label: "附加产品标识" },
+            "241": { len: 'var', label: "客户部件号" },
+            "250": { len: 'var', label: "副序列号" },
+            "400": { len: 'var', label: "客户采购订单号" },
+            "7003": { len: 10, label: "生产日期及时间" }
         };
 
-        // 统一预处理不可见字符
-        function preprocessText(text) {
-            // 1. 去掉开头常见的识别前缀 (]C1 代表 GS1-128, ]d2 代表 DataMatrix)
-            let clean = text.replace(/^\][A-Za-z0-9]{2}/, "");
-            // 2. 将所有可能是 FNC1 的乱码/方框替换为标准的 ASCII 29 (\x1d)
-            clean = clean.replace(/[\x1c-\x1f\ufffd□]/g, '\x1d');
-            return clean;
+        // 动态识别 AI 和规则的函数
+        function getAIRule(text, i) {
+            // 优先匹配长度较长的 AI (防止 3位 AI 被 2位 提前截断)
+            for (let len = 4; len >= 2; len--) {
+                if (i + len <= text.length) {
+                    let tempAi = text.substring(i, i + len);
+                    // 1. 查标准字典
+                    if (AIDict[tempAi]) {
+                        return { ai: tempAi, rule: AIDict[tempAi] };
+                    }
+                    // 2. 特殊处理：90-99 开头是企业内部自定义段落，一律为变长
+                    if (len === 2 && tempAi.match(/^9[0-9]$/)) {
+                        return { ai: tempAi, rule: { len: 'var', label: `企业内部自定义 (${tempAi})` } };
+                    }
+                    // 3. 特殊处理：310x - 316x 等计量单位规则 (长度定为 6)
+                    if (len === 4 && tempAi.match(/^31[0-6][0-9]$/)) {
+                        return { ai: tempAi, rule: { len: 6, label: `净重/体积 (${tempAi})` } };
+                    }
+                }
+            }
+            return null; // 真找不到
         }
 
-        // 自研的核心解析引擎：从左到右指针读取
+        function preprocessText(text) {
+            let clean = text.replace(/^\][A-Za-z0-9]{2}/, "");
+            // 彻底将所有的隐藏字符、乱码方块转为统一的 \x1d 分隔符
+            return clean.replace(/[\x1c-\x1f\ufffd□]/g, '\x1d');
+        }
+
         function customGS1Parse(text) {
             let results = [];
             let i = 0;
 
             while (i < text.length) {
-                // 如果遇到多余的 FNC1 分隔符，直接跳过
                 if (text[i] === '\x1d') {
-                    i++;
-                    continue;
+                    i++; continue;
                 }
 
-                // 读取接下来的两位作为 AI (应用标识符)
-                let ai = text.substring(i, i + 2);
-                let rule = AIDict[ai];
+                let match = getAIRule(text, i);
 
-                if (rule) {
-                    i += 2; // 指针跳过这 2 位 AI
+                if (match) {
+                    let ai = match.ai;
+                    let rule = match.rule;
+                    i += ai.length; // 跳过 AI 长度
 
                     if (rule.len === 'var') {
-                        // 【变长字段】：从当前位置一直找到下一个分隔符
                         let nextFnc1 = text.indexOf('\x1d', i);
                         if (nextFnc1 === -1) {
-                            // 后面没有分隔符了，说明是最后一段，截取到末尾
                             results.push({ ai: ai, label: rule.label, value: text.substring(i) });
-                            break; // 结束解析
+                            break;
                         } else {
-                            // 截取到分隔符之前的位置
                             results.push({ ai: ai, label: rule.label, value: text.substring(i, nextFnc1) });
-                            i = nextFnc1 + 1; // 指针跳过分隔符，继续下一轮
+                            i = nextFnc1 + 1; // 跳过分隔符
                         }
                     } else {
-                        // 【固定长度字段】：严格截取规定长度 (例如 01 固定 14 位)
+                        // 固定长度截取
                         let val = text.substring(i, i + rule.len);
                         results.push({ ai: ai, label: rule.label, value: val });
-                        i += rule.len; // 指针跳过这固定的位数，紧接着的一定是下一个 AI
+                        i += rule.len; 
                     }
                 } else {
-                    // 如果遇到了字典里没有的 AI，或者条码格式错乱
-                    // 为了防止死循环，把剩下的所有字符作为未知段落输出，并终止
-                    results.push({ ai: "??", label: "未知或未支持的段落", value: text.substring(i) });
-                    break;
+                    // 【关键修复：边界容错机制】
+                    // 遇到了完全未知的 AI 组合。我们不再截断整个字符串！
+                    // 我们把它当作变长字段处理，一直读到下一个 FNC1，然后继续拯救后面的数据。
+                    let nextFnc1 = text.indexOf('\x1d', i);
+                    let unknownAi = text.substring(i, i + 2); // 随便取两位做展示
+                    
+                    if (nextFnc1 === -1) {
+                        results.push({ ai: "??", label: "未知字段", value: text.substring(i) });
+                        break;
+                    } else {
+                        results.push({ ai: "??", label: "未知字段", value: text.substring(i, nextFnc1) });
+                        i = nextFnc1 + 1; // 跳过 FNC1，继续解析下半场！
+                    }
                 }
             }
             return results;
@@ -117,50 +149,42 @@
             html5QrCode.stop();
             statusEl.innerText = "扫描成功";
             
-            // 1. 预处理数据
             let standardText = preprocessText(decodedText);
             
-            // 2. 将数据展示在页面上，把不可见的 \x1d 变成红色的标签，方便你核对
+            // 渲染带有 FNC1 红色标记的原始文本
             document.getElementById('rawText').innerHTML = standardText.replace(/\x1d/g, '<span class="fnc1-badge">FNC1</span>');
             
-            // 3. 开始精准解析
             const elements = customGS1Parse(standardText);
-            
-            // 4. 渲染界面
             renderResults(elements);
             document.getElementById('resultArea').style.display = 'block';
         }
 
         function renderResults(elements) {
             const container = document.getElementById('parsedContent');
-            if (elements.length === 0) {
-                container.innerHTML = "<p style='color:red'>未能解析出任何段落，请检查条码格式。</p>";
-                return;
-            }
-
-            container.innerHTML = elements.map(el => `
+            container.innerHTML = elements.map(el => {
+                // 剔除 value 中可能残存的 \x1d，确保最终复制的内容没有方框
+                let cleanValue = el.value.replace(/\x1d/g, ''); 
+                let aiClass = el.ai === "??" ? "ai-tag unknown" : "ai-tag";
+                return `
                 <div class="data-row">
                     <div>
-                        <div class="label"><span class="ai-tag">${el.ai}</span>${el.label}</div>
-                        <div class="value">${el.value}</div>
+                        <div class="label"><span class="${aiClass}">${el.ai}</span>${el.label}</div>
+                        <div class="value">${cleanValue}</div>
                     </div>
-                    <button class="copy-btn" onclick="copyText(this, '${el.value}')">复制</button>
+                    <button class="copy-btn" onclick="copyText(this, '${cleanValue}')">复制</button>
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         function copyText(btnElement, text) {
             navigator.clipboard.writeText(text).then(() => {
                 const originalText = btnElement.innerText;
-                const originalBg = btnElement.style.background;
                 btnElement.innerText = "已复制";
                 btnElement.style.background = "#34C759";
                 setTimeout(() => {
                     btnElement.innerText = originalText;
-                    btnElement.style.background = ""; // 恢复 CSS 默认
+                    btnElement.style.background = ""; 
                 }, 1000);
-            }).catch(err => {
-                alert("复制失败，请手动选择复制");
             });
         }
 
