@@ -101,7 +101,7 @@ function manualFallBack(text) {
             statusEl.innerText = "扫描成功";
             
             document.getElementById('resultArea').style.display = 'block';
-            document.getElementById('rawText').innerText = decodedText;
+            document.getElementById('rawText').innerHTML = visualizeFNC1(decodedText);
 
             const elements = parseBarcode(decodedText);
             renderResults(elements);
