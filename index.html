@@ -3,25 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>GS1 专业解析助手</title>
+    <title>GS1 终极解析器</title>
     
     <script src="https://unpkg.com/html5-qrcode"></script>
-    <script src="https://cdn.jsdelivr.net/npm/gs1-barcode-parser@1.2.0/dist/gs1-barcode-parser.min.js"></script>
 
     <style>
         :root { --ios-blue: #007AFF; --bg: #F2F2F7; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); margin: 0; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); margin: 0; padding: 20px; }
         #reader { width: 100%; border-radius: 16px; overflow: hidden; background: black; box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
         .card { background: white; border-radius: 14px; padding: 16px; margin-top: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
-        .raw-data { font-size: 11px; color: #8e8e93; word-break: break-all; margin-bottom: 10px; font-family: monospace; }
-        .data-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 0.5px solid #E5E5EA; }
+        
+        .raw-data { font-size: 13px; color: #333; word-break: break-all; margin-top: 8px; font-family: "SF Mono", monospace; line-height: 1.5; padding: 10px; background: #f8f8f8; border-radius: 8px; border: 1px dashed #ccc;}
+        .fnc1-badge { color:#FF3B30; background:#FFE5E5; border:1px solid #FF3B30; border-radius:4px; padding:0 3px; font-size:11px; margin:0 2px; font-weight: bold;}
+        
+        .data-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 0.5px solid #E5E5EA; }
         .data-row:last-child { border-bottom: none; }
-        .label { font-size: 13px; color: #8e8e93; margin-bottom: 2px; }
-        .value { font-size: 16px; font-weight: 600; color: #1c1c1e; font-family: "SF Mono", Menlo, monospace; }
-        .copy-btn { background: var(--ios-blue); color: white; border: none; padding: 6px 14px; border-radius: 18px; font-size: 13px; font-weight: 500; }
-        .btn-reset { width: 100%; margin-top: 20px; padding: 16px; border: none; background: white; color: var(--ios-blue); border-radius: 14px; font-size: 17px; font-weight: 600; }
+        .label { font-size: 13px; color: #8e8e93; margin-bottom: 4px; }
+        .ai-tag { font-size: 12px; background: #E5E5EA; color: #3a3a3c; padding: 2px 6px; border-radius: 4px; margin-right: 6px; font-weight: 600;}
+        .value { font-size: 17px; font-weight: 600; color: #1c1c1e; font-family: monospace; letter-spacing: 0.5px; }
+        
+        .copy-btn { background: var(--ios-blue); color: white; border: none; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;}
+        .btn-reset { width: 100%; margin-top: 20px; padding: 16px; border: none; background: white; color: var(--ios-blue); border-radius: 14px; font-size: 17px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); cursor: pointer;}
         .status { text-align: center; color: #8e8e93; font-size: 14px; margin-bottom: 10px; }
-        .ai-tag { font-size: 10px; background: #E5E5EA; color: #3a3a3c; padding: 2px 6px; border-radius: 4px; margin-right: 5px; vertical-align: middle; }
     </style>
 </head>
 <body>
@@ -31,11 +34,9 @@
 
     <div id="resultArea" style="display: none;">
         <div class="card">
-            <div style="font-size: 12px; color: #8e8e93;">原始码值:</div>
+            <div style="font-size: 13px; color: #8e8e93; font-weight: 600;">原始数据分析:</div>
             <div class="raw-data" id="rawText"></div>
-            
-            <div id="parsedContent">
-                </div>
+            <div id="parsedContent" style="margin-top: 15px;"></div>
         </div>
         <button class="btn-reset" onclick="restartScanner()">继续扫描</button>
     </div>
@@ -43,84 +44,97 @@
     <script>
         const html5QrCode = new Html5Qrcode("reader");
         const statusEl = document.getElementById('status');
+        
+        // 我们自己定义的 GS1 规则字典
+        // len: 数字代表固定长度，'var' 代表可变长度
+        const AIDict = {
+            "01": { len: 14, label: "GTIN (商品条码)" },
+            "10": { len: 'var', label: "批次号" },
+            "11": { len: 6, label: "生产日期" },
+            "17": { len: 6, label: "有效期" },
+            "21": { len: 'var', label: "序列号" },
+            "30": { len: 'var', label: "数量" },
+        };
 
-        // 增强版：处理 FNC1 和 预处理
-        function parseBarcode(rawText) {
-            try {
-                // 先标准化处理方框
-                let cleanedText = preprocessRawText(rawText);
-        
-                // 移除扫描器前缀 (如 ]C1)
-                cleanedText = cleanedText.replace(/^\][A-Z0-9]{2}/, "");
-        
-                const parser = new GS1BarcodeParser.default(); 
-                const result = parser.parse(cleanedText);
-        
-                if (result && result.elements && result.elements.length > 0) {
-                    return result.elements;
-                } else {
-                    // 如果库解析失败，尝试最后的大招：强制补全 01 并在 FNC1 处分割
-                    return manualSplitting(cleanedText);
+        // 统一预处理不可见字符
+        function preprocessText(text) {
+            // 1. 去掉开头常见的识别前缀 (]C1 代表 GS1-128, ]d2 代表 DataMatrix)
+            let clean = text.replace(/^\][A-Za-z0-9]{2}/, "");
+            // 2. 将所有可能是 FNC1 的乱码/方框替换为标准的 ASCII 29 (\x1d)
+            clean = clean.replace(/[\x1c-\x1f\ufffd□]/g, '\x1d');
+            return clean;
+        }
+
+        // 自研的核心解析引擎：从左到右指针读取
+        function customGS1Parse(text) {
+            let results = [];
+            let i = 0;
+
+            while (i < text.length) {
+                // 如果遇到多余的 FNC1 分隔符，直接跳过
+                if (text[i] === '\x1d') {
+                    i++;
+                    continue;
                 }
-            } catch (e) {
-                console.error("解析库报错，切换手动模式", e);
-                return manualSplitting(preprocessRawText(rawText));
+
+                // 读取接下来的两位作为 AI (应用标识符)
+                let ai = text.substring(i, i + 2);
+                let rule = AIDict[ai];
+
+                if (rule) {
+                    i += 2; // 指针跳过这 2 位 AI
+
+                    if (rule.len === 'var') {
+                        // 【变长字段】：从当前位置一直找到下一个分隔符
+                        let nextFnc1 = text.indexOf('\x1d', i);
+                        if (nextFnc1 === -1) {
+                            // 后面没有分隔符了，说明是最后一段，截取到末尾
+                            results.push({ ai: ai, label: rule.label, value: text.substring(i) });
+                            break; // 结束解析
+                        } else {
+                            // 截取到分隔符之前的位置
+                            results.push({ ai: ai, label: rule.label, value: text.substring(i, nextFnc1) });
+                            i = nextFnc1 + 1; // 指针跳过分隔符，继续下一轮
+                        }
+                    } else {
+                        // 【固定长度字段】：严格截取规定长度 (例如 01 固定 14 位)
+                        let val = text.substring(i, i + rule.len);
+                        results.push({ ai: ai, label: rule.label, value: val });
+                        i += rule.len; // 指针跳过这固定的位数，紧接着的一定是下一个 AI
+                    }
+                } else {
+                    // 如果遇到了字典里没有的 AI，或者条码格式错乱
+                    // 为了防止死循环，把剩下的所有字符作为未知段落输出，并终止
+                    results.push({ ai: "??", label: "未知或未支持的段落", value: text.substring(i) });
+                    break;
+                }
             }
-        }
-        
-        // 辅助函数：让不可见的 FNC1 可视化（用于调试）
-        function visualizeFNC1(text) {
-            // 先把方框转成标准符号，再替换成 HTML 标签
-            let standard = preprocessRawText(text);
-            return standard.replace(/\x1d/g, '<span style="color:#FF9500; background:#FFF9E6; border:1px solid #FF9500; border-radius:3px; padding:0 2px; font-size:10px; margin:0 2px;">FNC1</span>');
-        }
-
-        // 保底逻辑：如果解析库罢工，至少把 GTIN 和 常见位切出来
-        function manualSplitting(text) {
-            // 这是一个简单的切割逻辑，把 \x1d 当作切刀
-            const segments = text.split('\x1d');
-            const results = [];
-            
-            segments.forEach((seg, index) => {
-                if (index === 0 && seg.startsWith('01')) {
-                     results.push({ ai: '01', label: 'GTIN', value: seg.substring(2, 16) });
-                     // 如果 01 后面紧跟了其他内容（没用分隔符）
-                     if (seg.length > 16) {
-                         const extra = seg.substring(16);
-                         results.push({ ai: '??', label: '未知段', value: extra });
-                     }
-                } else {
-                     results.push({ ai: '--', label: `分段 ${index}`, value: seg });
-                }
-            });
             return results;
-        }
-            function preprocessRawText(rawText) {
-            // 常见的扫描器占位符映射：
-            // \x1d 是标准的 GS (Group Separator)
-            // \x1c, \x1e, \x1f 有时也会被某些系统误认
-            // 有些浏览器会把它显示为 Unicode 的替代字符 \ufffd (那个带问号的方框)
-            return rawText.replace(/[\x1c-\x1f\ufffd]/g, '\x1d');
         }
 
         function onScanSuccess(decodedText) {
-            // 震动反馈 (iOS 需要用户交互后才生效)
             if (navigator.vibrate) navigator.vibrate(200);
-            
             html5QrCode.stop();
             statusEl.innerText = "扫描成功";
             
-            document.getElementById('resultArea').style.display = 'block';
-            document.getElementById('rawText').innerHTML = visualizeFNC1(decodedText);
-
-            const elements = parseBarcode(decodedText);
+            // 1. 预处理数据
+            let standardText = preprocessText(decodedText);
+            
+            // 2. 将数据展示在页面上，把不可见的 \x1d 变成红色的标签，方便你核对
+            document.getElementById('rawText').innerHTML = standardText.replace(/\x1d/g, '<span class="fnc1-badge">FNC1</span>');
+            
+            // 3. 开始精准解析
+            const elements = customGS1Parse(standardText);
+            
+            // 4. 渲染界面
             renderResults(elements);
+            document.getElementById('resultArea').style.display = 'block';
         }
 
         function renderResults(elements) {
             const container = document.getElementById('parsedContent');
-            if (!elements || elements.length === 0) {
-                container.innerHTML = "<p style='color:red'>无法解析此 GS1 格式</p>";
+            if (elements.length === 0) {
+                container.innerHTML = "<p style='color:red'>未能解析出任何段落，请检查条码格式。</p>";
                 return;
             }
 
@@ -130,21 +144,23 @@
                         <div class="label"><span class="ai-tag">${el.ai}</span>${el.label}</div>
                         <div class="value">${el.value}</div>
                     </div>
-                    <button class="copy-btn" onclick="copyText('${el.value}')">复制</button>
+                    <button class="copy-btn" onclick="copyText(this, '${el.value}')">复制</button>
                 </div>
             `).join('');
         }
 
-        function copyText(text) {
+        function copyText(btnElement, text) {
             navigator.clipboard.writeText(text).then(() => {
-                const btn = event.target;
-                const originalText = btn.innerText;
-                btn.innerText = "已复制";
-                btn.style.background = "#34C759";
+                const originalText = btnElement.innerText;
+                const originalBg = btnElement.style.background;
+                btnElement.innerText = "已复制";
+                btnElement.style.background = "#34C759";
                 setTimeout(() => {
-                    btn.innerText = originalText;
-                    btn.style.background = "#007AFF";
+                    btnElement.innerText = originalText;
+                    btnElement.style.background = ""; // 恢复 CSS 默认
                 }, 1000);
+            }).catch(err => {
+                alert("复制失败，请手动选择复制");
             });
         }
 
@@ -154,14 +170,13 @@
         }
 
         function start() {
-            statusEl.innerText = "请对准条码 (支持 DataMatrix / GS1-128)";
-            // 针对 iPhone 优化：优先使用后置环境摄像头，设置合适的帧率
+            statusEl.innerText = "请对准条码...";
             html5QrCode.start(
                 { facingMode: "environment" }, 
                 { fps: 20, qrbox: (w, h) => { return { width: w * 0.8, height: h * 0.4 } } },
                 onScanSuccess
             ).catch(err => {
-                statusEl.innerText = "摄像头权限开启失败";
+                statusEl.innerText = "请允许使用摄像头权限";
             });
         }
 
