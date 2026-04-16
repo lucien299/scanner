@@ -44,19 +44,54 @@
         const html5QrCode = new Html5Qrcode("reader");
         const statusEl = document.getElementById('status');
 
-        // GS1 解析函数
-        function parseBarcode(rawText) {
-            try {
-                // 使用 gs1-barcode-parser 库
-                // 它能自动处理 FNC1 (ASCII 29 / \u001d)
-                const parser = new GS1BarcodeParser.default(); 
-                const result = parser.parse(rawText);
-                return result.elements;
-            } catch (e) {
-                console.error("解析失败", e);
-                return null;
-            }
+        // 增强版：处理 FNC1 和 预处理
+function parseBarcode(rawText) {
+    try {
+        // 1. 预处理：移除扫描器可能添加的符号标识符 (如 ]C1, ]d2 等)
+        // ]C1 是 GS1-128 的标识，]d2 是 GS1 DataMatrix 的标识
+        let cleanedText = rawText.replace(/^\][A-Z0-9]{2}/, "");
+
+        // 2. 核心补丁：
+        // 有些手机扫描器会把 FNC1 转换成可打印字符，或者干脆丢失
+        // 我们强制确保 ASCII 29 (\x1d) 被正确识别。
+        // 如果你的条码在扫出来时用了特定的占位符（比如 | 或 ~），可以在这里替换：
+        cleanedText = cleanedText.replace(/[|~^]/g, "\x1d"); 
+
+        const parser = new GS1BarcodeParser.default(); 
+        
+        // 3. 尝试解析
+        const result = parser.parse(cleanedText);
+        
+        // 如果解析出来的 elements 为空，尝试另一种兼容模式
+        if (!result.elements || result.elements.length === 0) {
+            console.warn("标准解析库未识别，尝试手动分段...");
+            return manualFallBack(cleanedText);
         }
+
+        return result.elements;
+    } catch (e) {
+        console.error("解析出错:", e);
+        // 如果库报错，进入手动保底逻辑
+        return manualFallBack(rawText);
+    }
+}
+
+// 辅助函数：让不可见的 FNC1 可视化（用于调试）
+function visualizeFNC1(text) {
+    // 将不可见的 ASCII 29 替换为明显的 [FNC1] 标签
+    return text.replace(/\x1d/g, '<span style="color:red;font-weight:bold;">[FNC1]</span>');
+}
+
+// 保底逻辑：如果解析库罢工，至少把 GTIN 和 常见位切出来
+function manualFallBack(text) {
+    const fallback = [];
+    if (text.startsWith("01")) {
+        fallback.push({ ai: "01", label: "GTIN", value: text.substring(2, 16) });
+        // 后续逻辑可根据具体条码特征编写
+    }
+    return fallback;
+}
+        
 
         function onScanSuccess(decodedText) {
             // 震动反馈 (iOS 需要用户交互后才生效)
